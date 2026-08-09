@@ -1,0 +1,62 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "Service is already configured",
+      "cannot_connect": "Failed to connect",
+      "forbidden_id": "Forbidden mqtt client id",
+      "invalid_auth": "Invalid authentication details",
+      "mqtt_version": "Incorrect broker MQTT version",
+      "no_devices_found": "No devices were found.",
+      "single_instance_allowed": "Already configured. Only a single configuration possible.",
+      "unauthorized": "Unauthorized connection",
+      "unknown": "Unknown error"
+    },
+    "error": {
+      "cannot_connect": "Failed to connect"
+    },
+    "step": {
+      "setup": {
+        "data": {
+          "discovery": "Enable discovery",
+          "host": "Broker",
+          "port": "Port",
+          "username": "User name",
+          "password": "Password"
+        },
+        "description": "Please connect your MQTT broker to load iNELS components.",
+        "title": "inels-mqtt-homeassistant-sa MQTT broker"
+      },
+      "confirm": {
+        "data": {
+          "discovery": "Enable discovery"
+        },
+        "description": "Do you want to configure Home Assistant to connect to the MQTT broker by the add-on {addon}?",
+        "title": "MQTT broker via add-on"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "cannot_connect": "Failed to connect",
+      "forbidden_id": "Forbidden mqtt client id",
+      "invalid_auth": "Invalid authentication details",
+      "mqtt_version": "Incorrect broker MQTT version",
+      "no_devices_found": "No devices were found.",
+      "single_instance_allowed": "Already configured. Only a single configuration possible.",
+      "unauthorized": "Unauthorized connection",
+      "unknown": "Unknown error"
+    },
+    "step": {
+      "setup": {
+        "data": {
+          "host": "Broker",
+          "password": "Password",
+          "port": "Port",
+          "username": "User name"
+        },
+        "description": "Please enter MQTT broker connection information.",
+        "title": "inels-mqtt-homeassistant-sa MQTT broker"
+      }
+    }
+  }
+}

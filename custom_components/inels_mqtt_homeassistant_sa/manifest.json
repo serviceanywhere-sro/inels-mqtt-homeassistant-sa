@@ -1,0 +1,21 @@
+{
+  "domain": "inels_mqtt_homeassistant_sa",
+  "name": "inels-mqtt-homeassistant-sa",
+  "codeowners": [
+    "@serviceanywhere-sro"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "mqtt"
+  ],
+  "documentation": "https://github.com/serviceanywhere-sro/inels-mqtt-homeassistant-sa",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/serviceanywhere-sro/inels-mqtt-homeassistant-sa/issues",
+  "mqtt": [
+    "inels/status/#"
+  ],
+  "requirements": [
+    "elkoep-mqtt==0.2.32"
+  ],
+  "version": "0.1.0"
+}
