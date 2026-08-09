@@ -6,7 +6,8 @@
 
 Custom Home Assistant integration for iNELS BUS systems exposed through the iNELS MQTT gateway.
 
-This repository is based on the existing iNELS Home Assistant / MQTT open-source work and contains additional compatibility fixes and device handling developed for a CU3-08M installation.
+> **Origin of this project**
+> This repository is based directly on [jpbaltazar/inels-hacs-new](https://github.com/jpbaltazar/inels-hacs-new). It is intended as an **extension of that project**, not as an independent rewrite. The goal is to preserve the original integration approach while adding compatibility fixes and support for additional iNELS MQTT devices and behaviours.
 
 ## Current additions
 
@@ -50,7 +51,7 @@ custom_components/inels_mqtt_homeassistant_sa
 to:
 
 ```text
-/config/custom_components/inels_mqtt_homeassistant_sa_mqtt_homeassistant_sa
+/config/custom_components/inels_mqtt_homeassistant_sa
 ```
 
 and restart Home Assistant.
@@ -67,11 +68,14 @@ Each of the six dimmer outputs is presented as a Home Assistant `light` entity. 
 
 ## Upstream / attribution
 
-This project builds on MIT-licensed iNELS Home Assistant and MQTT projects, including work from:
+The primary upstream project for this repository is:
 
-- `jpbaltazar/inels-hacs-new`
-- `epdevlab/elkoep-hacs`
-- `epdevlab/elkoep-mqtt`
+- [jpbaltazar/inels-hacs-new](https://github.com/jpbaltazar/inels-hacs-new) — this repository is an **extension of that integration** and keeps its original concept and structure while adding further device support and compatibility fixes.
+
+Additional code and MQTT device handling also build on MIT-licensed work from:
+
+- [epdevlab/elkoep-hacs](https://github.com/epdevlab/elkoep-hacs)
+- [epdevlab/elkoep-mqtt](https://github.com/epdevlab/elkoep-mqtt)
 
 The upstream MIT license is included in this repository.
 
