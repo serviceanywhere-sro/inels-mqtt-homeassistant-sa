@@ -18,7 +18,7 @@
     "inels/status/#"
   ],
   "requirements": [
-    "elkoep-mqtt==0.2.32"
-  ],
-  "version": "0.2.0"
+  "elkoep-mqtt==0.2.33b3"
+],
+"version": "0.2.1"
 }
