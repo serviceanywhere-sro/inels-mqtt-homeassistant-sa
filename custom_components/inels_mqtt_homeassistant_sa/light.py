@@ -104,15 +104,15 @@ INELS_LIGHT_TYPES: dict[str, InelsLightType] = {
     ),
     "rgb": InelsLightType(
         name="RGB light",
-        color_modes=[ColorMode.BRIGHTNESS, ColorMode.RGB],
+        color_modes=[ColorMode.RGB],
     ),
     "rgbw": InelsLightType(
         name="RGBW light",
-        color_modes=[ColorMode.BRIGHTNESS, ColorMode.RGBW],
+        color_modes=[ColorMode.RGBW],
     ),
     "warm_light": InelsLightType(
         name="Tunable white light",
-        color_modes=[ColorMode.BRIGHTNESS, ColorMode.COLOR_TEMP],
+        color_modes=[ColorMode.COLOR_TEMP],
     ),
 }
 
@@ -268,8 +268,8 @@ class InelsLight(InelsBaseEntity, LightEntity):
     def available(self) -> bool:
         """Return availability.
 
-        A dimmer level of 0 is a perfectly valid OFF state.  It must not make
-        the entity unavailable.  We therefore consider the light available
+        A dimmer level of 0 is a perfectly valid OFF state. It must not make
+        the entity unavailable. We therefore consider the light available
         whenever its MQTT payload has been parsed and this channel exists.
 
         This deliberately does not use legacy device.is_available, because
@@ -320,7 +320,10 @@ class InelsLight(InelsBaseEntity, LightEntity):
         state = self._state_item()
 
         if state is not None and hasattr(state, "r"):
-            return (state.r, state.g, state.b)
+            return tuple(
+                int(max(0, min(100, i)) * 255 / 100)
+                for i in (state.r, state.g, state.b)
+            )
 
         return None
 
@@ -390,7 +393,7 @@ class InelsLight(InelsBaseEntity, LightEntity):
             ha_val,
         )
 
-        # Reflect OFF immediately.  The next status packet from CU3 remains
+        # Reflect OFF immediately. The next status packet from CU3 remains
         # authoritative and will update the entity again.
         self.async_write_ha_state()
 
@@ -403,21 +406,24 @@ class InelsLight(InelsBaseEntity, LightEntity):
             return
 
         item = ha_val.__dict__[self.key][self.index]
+        changed = False
 
         if ATTR_RGB_COLOR in kwargs:
             rgb = kwargs[ATTR_RGB_COLOR]
-            item.r = rgb[0]
-            item.g = rgb[1]
-            item.b = rgb[2]
+            item.r = round(rgb[0] * 100 / 255)
+            item.g = round(rgb[1] * 100 / 255)
+            item.b = round(rgb[2] * 100 / 255)
+            changed = True
 
-        elif ATTR_RGBW_COLOR in kwargs:
+        if ATTR_RGBW_COLOR in kwargs:
             rgbw = kwargs[ATTR_RGBW_COLOR]
             item.r = round(rgbw[0] * 100 / 255)
             item.g = round(rgbw[1] * 100 / 255)
             item.b = round(rgbw[2] * 100 / 255)
             item.w = round(rgbw[3] * 100 / 255)
+            changed = True
 
-        elif ATTR_BRIGHTNESS in kwargs:
+        if ATTR_BRIGHTNESS in kwargs:
             percent = round(
                 max(0, min(255, int(kwargs[ATTR_BRIGHTNESS])))
                 * 100
@@ -425,11 +431,12 @@ class InelsLight(InelsBaseEntity, LightEntity):
             )
 
             item.brightness = percent
+            changed = True
 
             if percent > 0:
                 self._last_nonzero_percent = percent
 
-        elif ATTR_COLOR_TEMP_KELVIN in kwargs:
+        if ATTR_COLOR_TEMP_KELVIN in kwargs:
             color_temp = max(
                 self.min_color_temp_kelvin,
                 min(
@@ -446,11 +453,10 @@ class InelsLight(InelsBaseEntity, LightEntity):
                     - self.min_color_temp_kelvin
                 )
             )
+            changed = True
 
-        else:
-            # Plain ON always switches the dimmer to 100 %.
-            # A brightness explicitly selected by the HA slider is still used
-            # when ATTR_BRIGHTNESS is present above.
+        if not changed:
+            # Plain ON switches the dimmer to 100 %.
             item.brightness = 100
 
         await self.hass.async_add_executor_job(
