@@ -1,6 +1,7 @@
 """Base class for iNELS components."""
 from __future__ import annotations
 
+from inelsmqtt.const import JA3_014M
 from inelsmqtt.devices import Device
 
 from homeassistant.helpers.entity import DeviceInfo, Entity
@@ -64,9 +65,29 @@ class InelsBaseEntity(Entity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info."""
+        """Return device info.
+
+        JA3-014M is special: every shutter channel is exposed as a separate
+        Home Assistant device. This keeps the cover and all timing settings
+        bound to the same physical shutter channel independently of sorting
+        or user-facing names.
+        """
 
         info = self._device.info()
+
+        if self._device.inels_type == JA3_014M and self.key == "simple_shutters":
+            shutter_number = self.index + 1
+            shutter_device_id = (
+                f"{self._device.unique_id}_shutter_{shutter_number}"
+            )
+
+            return DeviceInfo(
+                identifiers={(DOMAIN, shutter_device_id)},
+                manufacturer=info.manufacturer,
+                model=info.model_number,
+                name=f"{self._device.title} Shutter {shutter_number}",
+                sw_version=info.sw_version,
+            )
 
         return DeviceInfo(
             identifiers={

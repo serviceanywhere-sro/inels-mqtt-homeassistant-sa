@@ -1,8 +1,11 @@
 {
   "domain": "inels_mqtt_homeassistant_sa",
-  "name": "inels-mqtt-homeassistant-sa",
+  "name": "iNELS MQTT Home Assistant SA",
   "codeowners": [
-    "@serviceanywhere-sro"
+    "@serviceanywhere-sro",
+    "@Nejezchleb",
+    "@jhoralek",
+    "@zed4805"
   ],
   "config_flow": true,
   "dependencies": [
@@ -17,5 +20,5 @@
   "requirements": [
     "elkoep-mqtt==0.2.32"
   ],
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

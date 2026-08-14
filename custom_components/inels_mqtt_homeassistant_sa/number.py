@@ -179,6 +179,11 @@ class InelsShutterTimingNumber(NumberEntity):
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_icon = "mdi:timer-cog-outline"
 
+    # The entity name is relative to the per-shutter Home Assistant device.
+    # Renaming the device therefore keeps all four timing settings visually
+    # tied to the correct shutter.
+    _attr_has_entity_name = True
+
     def __init__(
         self,
         device: Device,
@@ -196,7 +201,7 @@ class InelsShutterTimingNumber(NumberEntity):
             f"{device.unique_id}_shutter_{shutter_index + 1}_{timing.key}"
         )
         self.entity_id = f"{Platform.NUMBER}.{self._attr_unique_id}"
-        self._attr_name = f"Shutter {shutter_index + 1} {timing.name}"
+        self._attr_name = timing.name
 
     @property
     def native_value(self) -> float:
@@ -210,16 +215,19 @@ class InelsShutterTimingNumber(NumberEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Attach timing setting to the physical JA3 device."""
+        """Attach timing setting to the exact JA3 shutter channel."""
         info = self._device.info()
+        shutter_number = self._shutter_index + 1
+        shutter_device_id = (
+            f"{self._device.unique_id}_shutter_{shutter_number}"
+        )
 
         return DeviceInfo(
-            identifiers={(DOMAIN, self._device.unique_id)},
+            identifiers={(DOMAIN, shutter_device_id)},
             manufacturer=info.manufacturer,
             model=info.model_number,
-            name=self._device.title,
+            name=f"{self._device.title} Shutter {shutter_number}",
             sw_version=info.sw_version,
-            via_device=(DOMAIN, self._device.parent_id),
         )
 
     async def async_set_native_value(self, value: float) -> None:

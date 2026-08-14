@@ -11,7 +11,7 @@ OLD_ENTITIES = "old_entities"
 
 CONF_DISCOVERY_PREFIX = "discovery_prefix"
 
-TITLE = "inels-mqtt-homeassistant-sa"
+TITLE = "iNELS_MQTT_SA"
 DESCRIPTION = ""
 
 INELS_VERSION = 1

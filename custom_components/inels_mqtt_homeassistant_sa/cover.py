@@ -265,6 +265,12 @@ class InelsTimedCover(InelsCover):
             description=description,
         )
 
+        # Each JA3 channel is its own HA device. Use the device name as the
+        # friendly cover name, so renaming the shutter device keeps the cover
+        # and all timing settings visually together.
+        self._attr_has_entity_name = True
+        self._attr_name = None
+
         # JA3-014M has no absolute position feedback. The percentage is only
         # a time-based estimate, so Home Assistant must treat the cover state
         # as assumed. This keeps both UP and DOWN controls available even when
@@ -350,8 +356,6 @@ class InelsTimedCover(InelsCover):
 
         moving = state in (Shutter_state.Open, Shutter_state.Closed)
 
-        # If the blind was moved by a wall button / iDM logic / another client,
-        # we cannot know how long it moved. Do not lie about the position.
         if moving and not self._active_command:
             if not self._external_motion_seen:
                 LOGGER.info(
