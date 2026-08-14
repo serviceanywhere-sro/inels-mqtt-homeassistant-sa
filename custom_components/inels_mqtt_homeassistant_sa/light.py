@@ -1,9 +1,12 @@
 """iNELS light platform.
 
-Includes robust brightness handling for BUS dimmers such as DA3-66M:
+Includes robust brightness handling for BUS dimmers such as DA3-66M
+and intuitive RGB/RGBW handling for devices such as DA3-03M/RGBW:
 - brightness 0 means OFF, never "unavailable"
-- plain ON restores the last non-zero brightness seen by this entity
-- slider writes 0-100 % to iNELS through elkoep-mqtt
+- OFF only sets brightness to 0 and preserves the selected color
+- changing color while OFF automatically turns the light ON
+- plain ON restores the last non-zero brightness
+- if no color has ever been selected, RGBW defaults to white
 """
 from __future__ import annotations
 
@@ -218,7 +221,6 @@ class InelsLight(InelsBaseEntity, LightEntity):
         self._attr_min_color_temp_kelvin = 2700
         self._attr_max_color_temp_kelvin = 6500
 
-        # Seed the remembered value from the current MQTT state, if non-zero.
         current = self._read_percent()
         if current is not None and current > 0:
             self._last_nonzero_percent = current
@@ -264,18 +266,60 @@ class InelsLight(InelsBaseEntity, LightEntity):
         if current is not None and current > 0:
             self._last_nonzero_percent = current
 
+    def _restore_brightness(self) -> int:
+        """Return the brightness to use when an OFF light must become ON."""
+
+        if self._last_nonzero_percent is not None and self._last_nonzero_percent > 0:
+            return self._last_nonzero_percent
+
+        return 100
+
+    @staticmethod
+    def _rgb_is_black(item: Any) -> bool:
+        """Return True if an RGB item has no visible color selected."""
+
+        return (
+            hasattr(item, "r")
+            and hasattr(item, "g")
+            and hasattr(item, "b")
+            and int(item.r) == 0
+            and int(item.g) == 0
+            and int(item.b) == 0
+        )
+
+    @staticmethod
+    def _rgbw_is_black(item: Any) -> bool:
+        """Return True if an RGBW item has no visible color selected."""
+
+        return (
+            hasattr(item, "r")
+            and hasattr(item, "g")
+            and hasattr(item, "b")
+            and hasattr(item, "w")
+            and int(item.r) == 0
+            and int(item.g) == 0
+            and int(item.b) == 0
+            and int(item.w) == 0
+        )
+
+    def _ensure_default_color(self, item: Any) -> None:
+        """Select a sensible default color if all channels are zero."""
+
+        if hasattr(item, "w"):
+            if self._rgbw_is_black(item):
+                # RGBW fixture: first ON defaults to pure white.
+                item.w = 100
+            return
+
+        if hasattr(item, "r") and self._rgb_is_black(item):
+            # RGB fixture: first ON defaults to neutral RGB white.
+            item.r = 100
+            item.g = 100
+            item.b = 100
+
     @property
     def available(self) -> bool:
-        """Return availability.
-
-        A dimmer level of 0 is a perfectly valid OFF state. It must not make
-        the entity unavailable. We therefore consider the light available
-        whenever its MQTT payload has been parsed and this channel exists.
-
-        This deliberately does not use legacy device.is_available, because
-        newer CU3 MQTT installations may not publish the old per-device
-        connected topic reliably.
-        """
+        """Return availability."""
 
         return self._device.values is not None and self._state_item() is not None
 
@@ -377,7 +421,7 @@ class InelsLight(InelsBaseEntity, LightEntity):
         return self._attr_color_mode
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn light off without losing the previous brightness."""
+        """Turn light off while keeping its selected color."""
 
         self._remember_current_brightness()
 
@@ -386,19 +430,21 @@ class InelsLight(InelsBaseEntity, LightEntity):
         if ha_val is None or not hasattr(ha_val, self.key):
             return
 
-        ha_val.__dict__[self.key][self.index].brightness = 0
+        item = ha_val.__dict__[self.key][self.index]
+
+        # For RGB/RGBW this changes only Y/master brightness.
+        # R/G/B/W values remain untouched and can be restored on the next ON.
+        item.brightness = 0
 
         await self.hass.async_add_executor_job(
             self._device.set_ha_value,
             ha_val,
         )
 
-        # Reflect OFF immediately. The next status packet from CU3 remains
-        # authoritative and will update the entity again.
         self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn light on or set its level."""
+        """Turn light on or change brightness/color."""
 
         ha_val = self._device.get_value().ha_value
 
@@ -406,14 +452,17 @@ class InelsLight(InelsBaseEntity, LightEntity):
             return
 
         item = ha_val.__dict__[self.key][self.index]
-        changed = False
+        color_changed = False
+        explicit_brightness = ATTR_BRIGHTNESS in kwargs
+        any_change = False
 
         if ATTR_RGB_COLOR in kwargs:
             rgb = kwargs[ATTR_RGB_COLOR]
             item.r = round(rgb[0] * 100 / 255)
             item.g = round(rgb[1] * 100 / 255)
             item.b = round(rgb[2] * 100 / 255)
-            changed = True
+            color_changed = True
+            any_change = True
 
         if ATTR_RGBW_COLOR in kwargs:
             rgbw = kwargs[ATTR_RGBW_COLOR]
@@ -421,9 +470,10 @@ class InelsLight(InelsBaseEntity, LightEntity):
             item.g = round(rgbw[1] * 100 / 255)
             item.b = round(rgbw[2] * 100 / 255)
             item.w = round(rgbw[3] * 100 / 255)
-            changed = True
+            color_changed = True
+            any_change = True
 
-        if ATTR_BRIGHTNESS in kwargs:
+        if explicit_brightness:
             percent = round(
                 max(0, min(255, int(kwargs[ATTR_BRIGHTNESS])))
                 * 100
@@ -431,10 +481,11 @@ class InelsLight(InelsBaseEntity, LightEntity):
             )
 
             item.brightness = percent
-            changed = True
+            any_change = True
 
             if percent > 0:
                 self._last_nonzero_percent = percent
+                self._ensure_default_color(item)
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             color_temp = max(
@@ -453,11 +504,31 @@ class InelsLight(InelsBaseEntity, LightEntity):
                     - self.min_color_temp_kelvin
                 )
             )
-            changed = True
+            any_change = True
 
-        if not changed:
-            # Plain ON switches the dimmer to 100 %.
-            item.brightness = 100
+        # Important DA3-03M/RGBW behaviour:
+        # If the user changes RGBW while Y=0, automatically restore Y so the
+        # selected color becomes visible immediately. An explicit brightness=0
+        # must still be respected.
+        if color_changed and not explicit_brightness:
+            try:
+                current_percent = int(item.brightness)
+            except (AttributeError, TypeError, ValueError):
+                current_percent = 0
+
+            if current_percent <= 0:
+                restored = self._restore_brightness()
+                item.brightness = restored
+                self._last_nonzero_percent = restored
+
+        if not any_change:
+            # Plain ON: keep the current/last selected color and restore the
+            # previous non-zero brightness. If the color is still all zeros,
+            # start with white.
+            self._ensure_default_color(item)
+            restored = self._restore_brightness()
+            item.brightness = restored
+            self._last_nonzero_percent = restored
 
         await self.hass.async_add_executor_job(
             self._device.set_ha_value,
