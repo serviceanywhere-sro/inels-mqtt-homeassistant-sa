@@ -5,8 +5,8 @@ and intuitive RGB/RGBW handling for devices such as DA3-03M/RGBW:
 - brightness 0 means OFF, never "unavailable"
 - OFF only sets brightness to 0 and preserves the selected color
 - changing color while OFF automatically turns the light ON
-- plain ON restores the last non-zero brightness
-- if no color has ever been selected, RGBW defaults to white
+- plain ON always starts RGB/RGBW lights as white at 100 %
+- changing brightness keeps the currently selected color
 """
 from __future__ import annotations
 
@@ -522,13 +522,22 @@ class InelsLight(InelsBaseEntity, LightEntity):
                 self._last_nonzero_percent = restored
 
         if not any_change:
-            # Plain ON: keep the current/last selected color and restore the
-            # previous non-zero brightness. If the color is still all zeros,
-            # start with white.
-            self._ensure_default_color(item)
-            restored = self._restore_brightness()
-            item.brightness = restored
-            self._last_nonzero_percent = restored
+            # Plain ON should behave like a normal wall light:
+            # RGBW -> pure white at 100 %
+            # RGB  -> RGB white at 100 %
+            # Other dimmers -> 100 %
+            if hasattr(item, "w"):
+                item.r = 0
+                item.g = 0
+                item.b = 0
+                item.w = 100
+            elif hasattr(item, "r"):
+                item.r = 100
+                item.g = 100
+                item.b = 100
+
+            item.brightness = 100
+            self._last_nonzero_percent = 100
 
         await self.hass.async_add_executor_job(
             self._device.set_ha_value,
