@@ -6,7 +6,8 @@ and intuitive RGB/RGBW handling for devices such as DA3-03M/RGBW:
 - OFF only sets brightness to 0 and preserves the selected color
 - changing color while OFF automatically turns the light ON
 - plain ON always starts RGB/RGBW lights as white at 100 %
-- changing brightness keeps the currently selected color
+- Home Assistant ON calls that arrive as brightness=255 also start white
+- changing brightness otherwise keeps the currently selected color
 """
 from __future__ import annotations
 
@@ -452,6 +453,16 @@ class InelsLight(InelsBaseEntity, LightEntity):
             return
 
         item = ha_val.__dict__[self.key][self.index]
+
+        # Remember whether the light was OFF before processing the HA command.
+        # Some Home Assistant UI controls send ON as brightness=255 instead of
+        # an empty light.turn_on call. Without this check, an old stored RGBW
+        # color (for example red) would be reused.
+        try:
+            was_off = int(item.brightness) <= 0
+        except (AttributeError, TypeError, ValueError):
+            was_off = not bool(self.is_on)
+
         color_changed = False
         explicit_brightness = ATTR_BRIGHTNESS in kwargs
         any_change = False
@@ -474,8 +485,12 @@ class InelsLight(InelsBaseEntity, LightEntity):
             any_change = True
 
         if explicit_brightness:
+            ha_brightness = max(
+                0,
+                min(255, int(kwargs[ATTR_BRIGHTNESS])),
+            )
             percent = round(
-                max(0, min(255, int(kwargs[ATTR_BRIGHTNESS])))
+                ha_brightness
                 * 100
                 / 255
             )
@@ -485,7 +500,23 @@ class InelsLight(InelsBaseEntity, LightEntity):
 
             if percent > 0:
                 self._last_nonzero_percent = percent
-                self._ensure_default_color(item)
+
+                # Home Assistant can represent a simple ON click as
+                # light.turn_on(brightness=255). If the light was OFF and no
+                # new color was requested, force the agreed default:
+                # RGBW = pure W 100 %, RGB = RGB white 100 %.
+                if was_off and ha_brightness == 255 and not color_changed:
+                    if hasattr(item, "w"):
+                        item.r = 0
+                        item.g = 0
+                        item.b = 0
+                        item.w = 100
+                    elif hasattr(item, "r"):
+                        item.r = 100
+                        item.g = 100
+                        item.b = 100
+                else:
+                    self._ensure_default_color(item)
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             color_temp = max(

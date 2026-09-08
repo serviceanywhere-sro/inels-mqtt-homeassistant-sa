@@ -8,6 +8,8 @@ import paho.mqtt.client as paho_mqtt
 from inelsmqtt import InelsMqtt
 from inelsmqtt.const import MQTT_TIMEOUT
 from inelsmqtt.discovery import InelsDiscovery
+from inelsmqtt.protocols.cu3 import DT_153
+from inelsmqtt.utils.common import Formatter
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
@@ -77,6 +79,66 @@ class _PahoCompat:
 
 
 inelsmqtt.mqtt = _PahoCompat()
+
+
+# ---------------------------------------------------------------------------
+# DA3-03M/RGBW (type 153) protocol correction.
+#
+# Measured CU3 MQTT mapping for LED 3:
+#   W = byte 23, B = byte 24, G = byte 29, R = byte 30, Y = byte 31
+#
+# elkoep-mqtt 0.2.33b3 interprets/sends those four colour positions as
+# R, G, B, W. That makes requested white appear as red on LED 3.
+# Correct both status parsing and SET payload generation here.
+# ---------------------------------------------------------------------------
+
+DT_153.DATA["LED_3"] = [29, 28, 23, 22, 30]
+
+
+def _dt153_create_inels_set_value(cls, device_value: Any) -> str:
+    """Create corrected DA3-03M/RGBW SET payload."""
+
+    led_1, led_2, led_3 = device_value.ha_value.rgbw
+
+    command = [
+        0,
+        0,
+        0,
+        0,
+        led_1.r,
+        led_1.g,
+        led_1.b,
+        led_1.w,
+        0,
+        0,
+        0,
+        0,
+        led_1.brightness,
+        led_2.r,
+        led_2.g,
+        led_2.b,
+        0,
+        0,
+        0,
+        0,
+        led_2.w,
+        led_2.brightness,
+        led_3.w,          # byte 23 = W3
+        led_3.b,          # byte 24 = B3
+        0,
+        0,
+        0,
+        0,
+        led_3.g,          # byte 29 = G3
+        led_3.r,          # byte 30 = R3
+        led_3.brightness, # byte 31 = Y3
+        0,
+    ]
+
+    return Formatter.format_data(command)
+
+
+DT_153.create_inels_set_value = classmethod(_dt153_create_inels_set_value)
 
 
 PLATFORMS: list[Platform] = [
