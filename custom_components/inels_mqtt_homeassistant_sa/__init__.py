@@ -7,8 +7,9 @@ import inelsmqtt
 import paho.mqtt.client as paho_mqtt
 from inelsmqtt import InelsMqtt
 from inelsmqtt.const import MQTT_TIMEOUT
+from inelsmqtt.devices import Device
 from inelsmqtt.discovery import InelsDiscovery
-from inelsmqtt.protocols.cu3 import DT_153
+from inelsmqtt.protocols.cu3 import DT_114, DT_153
 from inelsmqtt.utils.common import Formatter
 
 from homeassistant.config_entries import ConfigEntry
@@ -79,6 +80,123 @@ class _PahoCompat:
 
 
 inelsmqtt.mqtt = _PahoCompat()
+
+
+# ---------------------------------------------------------------------------
+# RC3-610M/DALI (type 114) protocol mapping.
+#
+# Based on ELKO EP "Integrace iNELS do MQTT – BUS", Rev. 2:
+# STATUS
+#   TEMP1      Data2-3
+#   AOUT1-2    Data4-5
+#   RE1-8      Data8-15
+#   TEMP2      Data18-19
+#   DALI1-4    Data20-23
+#   DIN1-6     Data24 bits 0-5
+#   RE overflow Data25 bits 0-7
+#   Alerts     Data26 (bit 6 DALI power, bit 7 DALI communication)
+#   DALI5-8    Data28-31
+#   DALI9-12   Data36-39
+#   DALI13-16  Data44-47
+#
+# SET
+#   Data0-1    AOUT ramps
+#   Data2-3    reserved
+#   Data4-5    AOUT1-2
+#   Data6-7    reserved
+#   Data8-15   RE1-8 commands (0x07 ON, 0x06 OFF)
+#   Data16-19  DALI1-4 ramps
+#   Data20-23  DALI1-4 values
+#   Data24-27  DALI5-8 ramps
+#   Data28-31  DALI5-8 values
+#   Data32-35  DALI9-12 ramps
+#   Data36-39  DALI9-12 values
+#   Data40-43  DALI13-16 ramps
+#   Data44-47  DALI13-16 values
+#
+# Keep the old elkoep-mqtt dependency, but force its type-114 mapping and
+# command construction to the documented byte layout.
+# ---------------------------------------------------------------------------
+
+DT_114.DATA.update(
+    {
+        "temp_in": [2, 3, 18, 19],
+        "aout": [4, 5],
+        "relay": list(range(8, 16)),
+        "dali": [
+            20, 21, 22, 23,
+            28, 29, 30, 31,
+            36, 37, 38, 39,
+            44, 45, 46, 47,
+        ],
+        "din": [24],
+        "relay_overflow": [25],
+        "alert": [26],
+    }
+)
+
+
+def _rc3_percent(value: Any) -> int:
+    """Clamp an RC3 analog/DALI level to the documented 0-100 % range."""
+
+    return max(0, min(100, int(value)))
+
+
+def _dt114_create_inels_set_value(cls, device_value: Any) -> str:
+    """Create RC3-610M/DALI SET payload exactly according to the MQTT spec."""
+
+    value = device_value.ha_value
+
+    command: list[int] = [0, 0, 0, 0]
+
+    # Data4-5: analog outputs; Data6-7: reserved.
+    command.extend(_rc3_percent(a.brightness) for a in value.aout)
+    command.extend([0, 0])
+
+    # Data8-15: relay commands.
+    # 0x07 = state ON + instruction 011 (immediate execution)
+    # 0x06 = state OFF + instruction 011 (immediate execution)
+    command.extend(0x07 if relay.is_on else 0x06 for relay in value.relay)
+
+    # Data16-47: four groups of 4 ramp bytes followed by 4 DALI levels.
+    for first in range(0, 16, 4):
+        command.extend([0, 0, 0, 0])
+        command.extend(
+            _rc3_percent(value.dali[index].brightness)
+            for index in range(first, first + 4)
+        )
+
+    return Formatter.format_data(command)
+
+
+DT_114.create_inels_set_value = classmethod(_dt114_create_inels_set_value)
+
+
+# The old library normally refreshes only entities detected as changed by its
+# differential comparison. For RC3 we deliberately refresh every RC3 entity
+# whenever a new STATUS packet arrives. This makes the documented DALI values
+# the source of truth even when the change was made by an iNELS wall control.
+#
+# Important: this can only reflect a wall-control change if the CU actually
+# publishes a new inels/status/<MAC>/114/<address> message.
+_original_device_callback = Device.callback
+
+
+def _device_callback_with_rc3_refresh(
+    self: Device,
+    availability_update: bool,
+) -> None:
+    """Always refresh all RC3 entities from every received RC3 status."""
+
+    if self.inels_type == "RC3-610DALI":
+        self.get_value()
+        self.complete_callback()
+        return
+
+    _original_device_callback(self, availability_update)
+
+
+Device.callback = _device_callback_with_rc3_refresh
 
 
 # ---------------------------------------------------------------------------
