@@ -6,7 +6,7 @@ from typing import Any
 import inelsmqtt
 import paho.mqtt.client as paho_mqtt
 from inelsmqtt import InelsMqtt
-from inelsmqtt.const import MQTT_TIMEOUT
+from inelsmqtt.const import LIGHT, MQTT_TIMEOUT
 from inelsmqtt.devices import Device
 from inelsmqtt.discovery import InelsDiscovery
 from inelsmqtt.protocols.cu3 import DT_114, DT_153
@@ -134,6 +134,16 @@ DT_114.DATA.update(
         "alert": [26],
     }
 )
+
+# RC3 is a mixed BUS actuator: its relays remain switch entities, while its
+# 16 DALI channels are dimmable light entities.  The upstream protocol class
+# labels the complete type 114 as SWITCH; force LIGHT here so Home Assistant
+# does not classify the DALI part as a simple on/off device.
+#
+# switch.py still creates the "relay" sub-entities as switches from the parsed
+# RC3 state, so changing this protocol-level classification does not remove or
+# change the eight relay outputs.
+DT_114.HA_TYPE = LIGHT
 
 
 def _rc3_percent(value: Any) -> int:
