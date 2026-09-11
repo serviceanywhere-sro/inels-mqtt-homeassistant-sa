@@ -19,6 +19,7 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from .communication import CommunicationTracker
 from .const import (
     BROKER,
     BROKER_CONFIG,
@@ -27,6 +28,8 @@ from .const import (
     LOGGER,
     OLD_ENTITIES,
 )
+
+COMM_TRACKER = "communication_tracker"
 
 
 class _PahoCompat:
@@ -345,6 +348,8 @@ async def async_setup_entry(
         {},
     )[entry.entry_id] = inels_data
 
+    tracker: CommunicationTracker | None = None
+
     try:
         discovery = InelsDiscovery(mqtt)
 
@@ -354,7 +359,19 @@ async def async_setup_entry(
 
         inels_data[DEVICES] = discovery.devices
 
+        # Passive communication diagnostics. This only observes MQTT packets
+        # that are already flowing and adds no polling traffic to CU3/BUS.
+        tracker = CommunicationTracker(
+            hass,
+            mqtt,
+            discovery.devices,
+        )
+        tracker.start()
+        inels_data[COMM_TRACKER] = tracker
+
     except Exception as exc:
+        if tracker is not None:
+            tracker.close()
         await hass.async_add_executor_job(
             mqtt.close
         )
@@ -455,6 +472,10 @@ async def async_unload_entry(
     hass_data = hass.data[DOMAIN][
         entry.entry_id
     ]
+
+    tracker = hass_data.get(COMM_TRACKER)
+    if tracker is not None:
+        tracker.close()
 
     broker: InelsMqtt = hass_data[BROKER]
 
