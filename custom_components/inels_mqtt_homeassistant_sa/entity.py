@@ -53,9 +53,28 @@ class InelsBaseEntity(Entity):
         )
 
     def _callback(self) -> None:
-        """Get data from broker into Home Assistant."""
+        """Write an MQTT-pushed state safely on the Home Assistant loop.
 
-        self.schedule_update_ha_state()
+        elkoep-mqtt invokes device/entity callbacks from Paho MQTT's network
+        thread. Home Assistant entity state writes must run on HA's event-loop
+        thread. Queue the write there instead of calling
+        schedule_update_ha_state() directly from the MQTT thread.
+        """
+
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+
+        try:
+            hass.loop.call_soon_threadsafe(
+                self.async_write_ha_state
+            )
+        except RuntimeError:
+            # Home Assistant can close the loop while MQTT is shutting down.
+            LOGGER.debug(
+                "Ignoring late MQTT update for %s during shutdown",
+                self.entity_id,
+            )
 
     @property
     def should_poll(self) -> bool:

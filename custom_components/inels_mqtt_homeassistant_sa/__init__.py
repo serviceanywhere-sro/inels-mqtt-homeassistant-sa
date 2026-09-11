@@ -139,7 +139,7 @@ DT_114.DATA.update(
 )
 
 # RC3 is a mixed BUS actuator: its relays remain switch entities, while its
-# 16 DALI channels are dimmable light entities.  The upstream protocol class
+# 16 DALI channels are dimmable light entities. The upstream protocol class
 # labels the complete type 114 as SWITCH; force LIGHT here so Home Assistant
 # does not classify the DALI part as a simple on/off device.
 #
@@ -185,31 +185,43 @@ def _dt114_create_inels_set_value(cls, device_value: Any) -> str:
 DT_114.create_inels_set_value = classmethod(_dt114_create_inels_set_value)
 
 
-# The old library normally refreshes only entities detected as changed by its
-# differential comparison. For RC3 we deliberately refresh every RC3 entity
-# whenever a new STATUS packet arrives. This makes the documented DALI values
-# the source of truth even when the change was made by an iNELS wall control.
+# ---------------------------------------------------------------------------
+# GLOBAL LIVE MQTT STATUS REFRESH
 #
-# Important: this can only reflect a wall-control change if the CU actually
-# publishes a new inels/status/<MAC>/114/<address> message.
-_original_device_callback = Device.callback
+# The legacy elkoep-mqtt Device.callback() performs a differential comparison
+# and only calls callbacks that it believes changed. On current CU3/HA setups
+# this can leave Home Assistant stale even though a fresh inels/status/...
+# packet was received correctly by the broker (for example SA3-06M changing
+# 06 -> 07 after a physical wall-control action).
+#
+# MQTT STATUS is the source of truth. Therefore every received status packet
+# is parsed again and ALL HA entities belonging to that physical iNELS device
+# are refreshed. This applies uniformly to relays, dimmers, DALI, covers,
+# sensors, climates, binary inputs, selectors and other supported entities.
+#
+# This does NOT poll CU3 and does NOT generate any additional BUS/MQTT traffic;
+# it only refreshes HA entities when a packet is already received.
+# ---------------------------------------------------------------------------
 
 
-def _device_callback_with_rc3_refresh(
+def _device_callback_with_live_status_refresh(
     self: Device,
     availability_update: bool,
 ) -> None:
-    """Always refresh all RC3 entities from every received RC3 status."""
+    """Refresh every entity of a device from every received MQTT state."""
 
-    if self.inels_type == "RC3-610DALI":
+    try:
         self.get_value()
         self.complete_callback()
-        return
+    except Exception:  # noqa: BLE001 - one malformed packet must not kill MQTT
+        LOGGER.exception(
+            "Unable to process live MQTT state for %s (%s)",
+            self.unique_id,
+            self.inels_type,
+        )
 
-    _original_device_callback(self, availability_update)
 
-
-Device.callback = _device_callback_with_rc3_refresh
+Device.callback = _device_callback_with_live_status_refresh
 
 
 # ---------------------------------------------------------------------------
