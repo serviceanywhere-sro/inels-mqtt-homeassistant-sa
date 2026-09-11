@@ -213,17 +213,21 @@ Device.callback = _device_callback_with_rc3_refresh
 
 
 # ---------------------------------------------------------------------------
-# DA3-03M/RGBW (type 153) protocol correction.
+# DA3-03M/RGBW (type 153) protocol mapping.
 #
-# Measured CU3 MQTT mapping for LED 3:
-#   W = byte 23, B = byte 24, G = byte 29, R = byte 30, Y = byte 31
+# Based on ELKO EP "Integrace iNELS do MQTT – BUS", Rev. 2:
+# STATUS / SET for LED 3:
+#   Data22 = LED3-R
+#   Data23 = LED3-G
+#   Data28 = LED3-B
+#   Data29 = LED3-W
+#   Data30 = LED3-Y
 #
-# elkoep-mqtt 0.2.33b3 interprets/sends those four colour positions as
-# R, G, B, W. That makes requested white appear as red on LED 3.
-# Correct both status parsing and SET payload generation here.
+# Keep status parsing and SET payload generation aligned with the official
+# MQTT BUS documentation.
 # ---------------------------------------------------------------------------
 
-DT_153.DATA["LED_3"] = [29, 28, 23, 22, 30]
+DT_153.DATA["LED_3"] = [22, 23, 28, 29, 30]
 
 
 def _dt153_create_inels_set_value(cls, device_value: Any) -> str:
@@ -254,15 +258,15 @@ def _dt153_create_inels_set_value(cls, device_value: Any) -> str:
         0,
         led_2.w,
         led_2.brightness,
-        led_3.w,          # byte 23 = W3
-        led_3.b,          # byte 24 = B3
+        led_3.r,          # Data22 = LED3-R
+        led_3.g,          # Data23 = LED3-G
         0,
         0,
         0,
         0,
-        led_3.g,          # byte 29 = G3
-        led_3.r,          # byte 30 = R3
-        led_3.brightness, # byte 31 = Y3
+        led_3.b,          # Data28 = LED3-B
+        led_3.w,          # Data29 = LED3-W
+        led_3.brightness, # Data30 = LED3-Y
         0,
     ]
 
