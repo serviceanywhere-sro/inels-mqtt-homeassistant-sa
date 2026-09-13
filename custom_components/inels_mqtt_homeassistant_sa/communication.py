@@ -266,20 +266,25 @@ class CommunicationTracker:
         gateway_online = self.gateway_online(mac)
         if gateway_online is False:
             return False
+        if gateway_online is not True:
+            # CU communication is not currently live-confirmed. Do not keep an
+            # individual BUS device falsely green from an older connected=true.
+            return None
 
         connected = self._device_connected.get(uid)
         if connected is False:
             return False
-        if connected is True and gateway_online is not False:
+        if connected is True:
             return True
 
-        if uid in self._device_last_seen and gateway_online is True:
+        if uid in self._device_last_seen:
             return True
         return None
 
     def bus_state(self, mac: str, bus_number: int) -> bool | None:
-        state = self.gateway_health_state(mac)
-        if state in {"broker_offline", "offline"}:
+        # BUS state from the last gw/status packet must not stay green when
+        # communication with the CU is stale or has not yet been confirmed.
+        if self.gateway_online(mac) is not True:
             return None
         return self._gateway_bus.get(mac, {}).get(bus_number)
 
@@ -433,6 +438,14 @@ class CommunicationTracker:
             self._gateway_last_seen[mac] = now
             self._maybe_report_gateway_seen(mac, now)
 
+            # Any fresh packet other than an explicit gw connected=false proves
+            # that the MQTT path from this CU is alive again. Clear an older
+            # offline flag so a real status packet can restore communication.
+            if not (element_type == "gw" and message_type == "connected"):
+                if self._gateway_connected.get(mac) is False:
+                    self._gateway_connected[mac] = None
+                    self._mark_gateway_dirty(mac, include_devices=True)
+
         if element_type == "gw":
             if message_type == "connected":
                 new_state = _parse_connected(payload)
@@ -475,6 +488,12 @@ class CommunicationTracker:
                 self._device_connected_cached[uid] = new_state
 
         if fresh and not retained:
+            # A fresh device STATUS packet proves that the device is talking
+            # again, even if an older live connected=false was seen before.
+            if message_type == "status" and self._device_connected.get(uid) is False:
+                self._device_connected[uid] = None
+                self._dirty.add(f"device:{uid}")
+
             self._device_last_seen[uid] = now
             self._maybe_report_device_seen(uid, now)
 
