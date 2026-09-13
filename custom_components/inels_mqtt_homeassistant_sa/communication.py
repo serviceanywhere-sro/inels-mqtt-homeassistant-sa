@@ -15,8 +15,7 @@ from .const import LOGGER
 
 COMM_WATCHDOG_SECONDS = 5
 COMM_LAST_SEEN_REPORT_SECONDS = 30
-COMM_HEARTBEAT_WARNING_SECONDS = 120
-COMM_HEARTBEAT_OFFLINE_SECONDS = 300
+COMM_LIVE_CONFIRMATION_SECONDS = 300
 
 
 _TRUE_TEXT = {
@@ -139,7 +138,7 @@ def _first_metadata_value(payload: dict[str, Any], names: tuple[str, ...]) -> st
 
 
 class CommunicationTracker:
-    """Track live iNELS MQTT communication without polling BUS devices."""
+    """Track iNELS MQTT availability and live traffic without BUS polling."""
 
     def __init__(self, hass: HomeAssistant, mqtt: Any, devices: list[Any]) -> None:
         self.hass = hass
@@ -151,16 +150,17 @@ class CommunicationTracker:
         }
         self._device_mac: dict[str, str] = {}
         self._device_connected: dict[str, bool | None] = {}
+        self._device_connected_cached: dict[str, bool | None] = {}
         self._device_last_seen: dict[str, datetime] = {}
         self._device_reported_last_seen: dict[str, datetime] = {}
 
         self._gateway_connected: dict[str, bool | None] = {}
+        self._gateway_connected_cached: dict[str, bool | None] = {}
         self._gateway_last_seen: dict[str, datetime] = {}
         self._gateway_reported_last_seen: dict[str, datetime] = {}
-        self._gateway_heartbeat_seen: dict[str, datetime] = {}
         self._gateway_status: dict[str, dict[str, Any]] = {}
         self._gateway_bus: dict[str, dict[int, bool | None]] = {}
-        self._gateway_watchdog_state: dict[str, str] = {}
+        self._gateway_health_reported: dict[str, str] = {}
 
         self._listeners: dict[str, set[Callable[[], None]]] = defaultdict(set)
         self._dirty: set[str] = set()
@@ -198,13 +198,10 @@ class CommunicationTracker:
         except Exception:
             return False
 
-    def gateway_heartbeat_last_seen(self, mac: str) -> datetime | None:
-        return self._gateway_heartbeat_seen.get(mac)
-
-    def gateway_heartbeat_age_seconds(
+    def gateway_live_age_seconds(
         self, mac: str, now: datetime | None = None
     ) -> int | None:
-        last_seen = self._gateway_heartbeat_seen.get(mac)
+        last_seen = self._gateway_last_seen.get(mac)
         if last_seen is None:
             return None
         current = now or _utcnow()
@@ -213,42 +210,47 @@ class CommunicationTracker:
     def gateway_health_state(
         self, mac: str, now: datetime | None = None
     ) -> str:
+        """Return broker_offline/offline/ok/stale/unknown for one CU.
+
+        Retained/cached MQTT values never prove current communication. A CU is
+        green only after a fresh, non-retained packet has really arrived since
+        this HA session started. If that proof becomes old, the state changes
+        to ``stale`` (HA binary sensor = unknown), not falsely to offline.
+        """
         if not self.broker_online:
             return "broker_offline"
 
+        # Only a LIVE connected=false packet is authoritative for offline.
         if self._gateway_connected.get(mac) is False:
             return "offline"
 
-        age = self.gateway_heartbeat_age_seconds(mac, now)
+        age = self.gateway_live_age_seconds(mac, now)
         if age is None:
             return "unknown"
-        if age >= COMM_HEARTBEAT_OFFLINE_SECONDS:
-            return "offline"
-        if age >= COMM_HEARTBEAT_WARNING_SECONDS:
-            return "warning"
+        if age >= COMM_LIVE_CONFIRMATION_SECONDS:
+            return "stale"
         return "ok"
 
     def gateway_online(self, mac: str) -> bool | None:
         state = self.gateway_health_state(mac)
         if state in {"broker_offline", "offline"}:
             return False
-        if state in {"ok", "warning"}:
+        if state == "ok":
             return True
         return None
 
     def gateway_diagnostic_attributes(self, mac: str) -> dict[str, Any]:
         now = _utcnow()
         result = self.gateway_metadata(mac)
-        last_heartbeat = self.gateway_heartbeat_last_seen(mac)
         last_communication = self.gateway_last_seen(mac)
         result.update(
             {
                 "communication_state": self.gateway_health_state(mac, now),
-                "communication_mode": "mqtt_connected_watchdog",
-                "heartbeat_age_seconds": self.gateway_heartbeat_age_seconds(mac, now),
-                "warning_after_seconds": COMM_HEARTBEAT_WARNING_SECONDS,
-                "offline_after_seconds": COMM_HEARTBEAT_OFFLINE_SECONDS,
-                "last_heartbeat": last_heartbeat.isoformat() if last_heartbeat else None,
+                "communication_mode": "live_mqtt_confirmation",
+                "live_confirmation_valid_seconds": COMM_LIVE_CONFIRMATION_SECONDS,
+                "live_message_age_seconds": self.gateway_live_age_seconds(mac, now),
+                "live_connected_state": self._gateway_connected.get(mac),
+                "cached_connected_state": self._gateway_connected_cached.get(mac),
                 "last_mqtt_communication": (
                     last_communication.isoformat() if last_communication else None
                 ),
@@ -276,7 +278,8 @@ class CommunicationTracker:
         return None
 
     def bus_state(self, mac: str, bus_number: int) -> bool | None:
-        if self.gateway_online(mac) is not True:
+        state = self.gateway_health_state(mac)
+        if state in {"broker_offline", "offline"}:
             return None
         return self._gateway_bus.get(mac, {}).get(bus_number)
 
@@ -343,8 +346,6 @@ class CommunicationTracker:
                 )
 
         self._last_broker_online = self.broker_online
-        for mac in self.gateway_macs:
-            self._gateway_watchdog_state[mac] = self.gateway_health_state(mac)
 
         self._unsub_interval = async_track_time_interval(
             self.hass,
@@ -436,15 +437,15 @@ class CommunicationTracker:
             if message_type == "connected":
                 new_state = _parse_connected(payload)
 
-                if fresh and not retained and new_state is not False:
-                    self._gateway_heartbeat_seen[mac] = now
-
-                if self._gateway_connected.get(mac) != new_state:
-                    self._gateway_connected[mac] = new_state
-                    self._mark_gateway_dirty(mac, include_devices=True)
-
                 if fresh and not retained:
+                    if self._gateway_connected.get(mac) != new_state:
+                        self._gateway_connected[mac] = new_state
+                        self._mark_gateway_dirty(mac, include_devices=True)
                     self._dirty.add(f"gateway:{mac}")
+                else:
+                    # Retained/cached state is useful only as diagnostics. It
+                    # must never turn the live communication sensor green.
+                    self._gateway_connected_cached[mac] = new_state
 
             elif message_type == "status":
                 parsed, buses = _parse_gateway_payload(payload)
@@ -466,9 +467,12 @@ class CommunicationTracker:
 
         if message_type == "connected":
             new_state = _parse_connected(payload)
-            if self._device_connected.get(uid) != new_state:
-                self._device_connected[uid] = new_state
-                self._dirty.add(f"device:{uid}")
+            if fresh and not retained:
+                if self._device_connected.get(uid) != new_state:
+                    self._device_connected[uid] = new_state
+                    self._dirty.add(f"device:{uid}")
+            else:
+                self._device_connected_cached[uid] = new_state
 
         if fresh and not retained:
             self._device_last_seen[uid] = now
@@ -523,31 +527,28 @@ class CommunicationTracker:
             if device_mac == mac:
                 self._dirty.add(f"device:{uid}")
 
-    def _check_gateway_watchdogs(self, now: datetime) -> None:
+    def _check_gateway_health_transitions(self, now: datetime) -> None:
+        """Refresh entities when live proof expires or communication returns."""
         for mac in self.gateway_macs:
-            new_state = self.gateway_health_state(mac, now)
-            old_state = self._gateway_watchdog_state.get(mac)
-
-            if old_state == new_state:
+            state = self.gateway_health_state(mac, now)
+            previous = self._gateway_health_reported.get(mac)
+            if previous == state:
                 continue
 
-            self._gateway_watchdog_state[mac] = new_state
+            self._gateway_health_reported[mac] = state
             self._mark_gateway_dirty(mac, include_devices=True)
 
-            age = self.gateway_heartbeat_age_seconds(mac, now)
-            if new_state == "warning":
+            if state == "stale":
                 LOGGER.warning(
-                    "iNELS CU %s MQTT heartbeat delayed (%s s)", mac, age
-                )
-            elif new_state == "offline" and old_state not in {None, "offline"}:
-                LOGGER.warning(
-                    "iNELS CU %s MQTT communication unavailable "
-                    "(last heartbeat %s s ago)",
+                    "iNELS CU %s MQTT communication is no longer live-confirmed "
+                    "(no fresh packet for %s s)",
                     mac,
-                    age,
+                    self.gateway_live_age_seconds(mac, now),
                 )
-            elif new_state == "ok" and old_state in {"warning", "offline"}:
-                LOGGER.info("iNELS CU %s MQTT communication restored", mac)
+            elif state == "offline":
+                LOGGER.warning("iNELS CU %s reports MQTT offline", mac)
+            elif state == "ok" and previous in {"stale", "offline", "unknown"}:
+                LOGGER.info("iNELS CU %s MQTT live communication confirmed", mac)
 
     @callback
     def _watchdog_tick(self, now: datetime) -> None:
@@ -560,7 +561,7 @@ class CommunicationTracker:
             for mac in self.gateway_macs:
                 self._mark_gateway_dirty(mac, include_devices=True)
 
-        self._check_gateway_watchdogs(current)
+        self._check_gateway_health_transitions(current)
         self._flush_pending_last_seen(current)
         self._notify_dirty()
 
