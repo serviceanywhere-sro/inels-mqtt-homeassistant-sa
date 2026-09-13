@@ -15,41 +15,21 @@ from .const import LOGGER
 
 COMM_WATCHDOG_SECONDS = 5
 COMM_LAST_SEEN_REPORT_SECONDS = 30
+COMM_HEARTBEAT_WARNING_SECONDS = 120
+COMM_HEARTBEAT_OFFLINE_SECONDS = 300
 
 
 _TRUE_TEXT = {
-    "1",
-    "true",
-    "on",
-    "online",
-    "ok",
-    "connected",
-    "running",
-    "run",
-    "active",
-    "ready",
+    "1", "true", "on", "online", "ok", "connected", "running",
+    "run", "active", "ready",
 }
 _FALSE_TEXT = {
-    "0",
-    "false",
-    "off",
-    "offline",
-    "error",
-    "fault",
-    "disconnected",
-    "failed",
-    "fail",
+    "0", "false", "off", "offline", "error", "fault", "disconnected",
+    "failed", "fail",
 }
 _UNKNOWN_TEXT = {
-    "",
-    "none",
-    "null",
-    "unknown",
-    "n/a",
-    "na",
-    "notused",
-    "not used",
-    "unused",
+    "", "none", "null", "unknown", "n/a", "na", "notused",
+    "not used", "unused",
 }
 
 
@@ -138,9 +118,7 @@ def _parse_gateway_payload(payload: Any) -> tuple[dict[str, Any], dict[int, bool
         candidates = [
             value
             for key, value in flat.items()
-            if key == wanted
-            or key.startswith(wanted)
-            or key.endswith(wanted)
+            if key == wanted or key.startswith(wanted) or key.endswith(wanted)
         ]
         for candidate in candidates:
             parsed_bool = _to_bool(candidate)
@@ -161,7 +139,7 @@ def _first_metadata_value(payload: dict[str, Any], names: tuple[str, ...]) -> st
 
 
 class CommunicationTracker:
-    """Track live iNELS MQTT communication without polling devices."""
+    """Track live iNELS MQTT communication without polling BUS devices."""
 
     def __init__(self, hass: HomeAssistant, mqtt: Any, devices: list[Any]) -> None:
         self.hass = hass
@@ -179,8 +157,10 @@ class CommunicationTracker:
         self._gateway_connected: dict[str, bool | None] = {}
         self._gateway_last_seen: dict[str, datetime] = {}
         self._gateway_reported_last_seen: dict[str, datetime] = {}
+        self._gateway_heartbeat_seen: dict[str, datetime] = {}
         self._gateway_status: dict[str, dict[str, Any]] = {}
         self._gateway_bus: dict[str, dict[int, bool | None]] = {}
+        self._gateway_watchdog_state: dict[str, str] = {}
 
         self._listeners: dict[str, set[Callable[[], None]]] = defaultdict(set)
         self._dirty: set[str] = set()
@@ -208,32 +188,73 @@ class CommunicationTracker:
         return parts[3].lower() not in {"bits", "integers", "gw"}
 
     def device_mac(self, device_or_uid: Any) -> str | None:
-        uid = (
-            device_or_uid
-            if isinstance(device_or_uid, str)
-            else device_or_uid.unique_id
-        )
+        uid = device_or_uid if isinstance(device_or_uid, str) else device_or_uid.unique_id
         return self._device_mac.get(uid)
 
     @property
     def broker_online(self) -> bool:
         try:
             return bool(self.mqtt.client.is_connected())
-        except Exception:  # noqa: BLE001 - diagnostics must never break integration
+        except Exception:
             return False
+
+    def gateway_heartbeat_last_seen(self, mac: str) -> datetime | None:
+        return self._gateway_heartbeat_seen.get(mac)
+
+    def gateway_heartbeat_age_seconds(
+        self, mac: str, now: datetime | None = None
+    ) -> int | None:
+        last_seen = self._gateway_heartbeat_seen.get(mac)
+        if last_seen is None:
+            return None
+        current = now or _utcnow()
+        return max(0, int((current - last_seen).total_seconds()))
+
+    def gateway_health_state(
+        self, mac: str, now: datetime | None = None
+    ) -> str:
+        if not self.broker_online:
+            return "broker_offline"
+
+        if self._gateway_connected.get(mac) is False:
+            return "offline"
+
+        age = self.gateway_heartbeat_age_seconds(mac, now)
+        if age is None:
+            return "unknown"
+        if age >= COMM_HEARTBEAT_OFFLINE_SECONDS:
+            return "offline"
+        if age >= COMM_HEARTBEAT_WARNING_SECONDS:
+            return "warning"
+        return "ok"
 
     def gateway_online(self, mac: str) -> bool | None:
-        if not self.broker_online:
+        state = self.gateway_health_state(mac)
+        if state in {"broker_offline", "offline"}:
             return False
-
-        connected = self._gateway_connected.get(mac)
-        if connected is False:
-            return False
-        if connected is True:
-            return True
-        if mac in self._gateway_last_seen:
+        if state in {"ok", "warning"}:
             return True
         return None
+
+    def gateway_diagnostic_attributes(self, mac: str) -> dict[str, Any]:
+        now = _utcnow()
+        result = self.gateway_metadata(mac)
+        last_heartbeat = self.gateway_heartbeat_last_seen(mac)
+        last_communication = self.gateway_last_seen(mac)
+        result.update(
+            {
+                "communication_state": self.gateway_health_state(mac, now),
+                "communication_mode": "mqtt_connected_watchdog",
+                "heartbeat_age_seconds": self.gateway_heartbeat_age_seconds(mac, now),
+                "warning_after_seconds": COMM_HEARTBEAT_WARNING_SECONDS,
+                "offline_after_seconds": COMM_HEARTBEAT_OFFLINE_SECONDS,
+                "last_heartbeat": last_heartbeat.isoformat() if last_heartbeat else None,
+                "last_mqtt_communication": (
+                    last_communication.isoformat() if last_communication else None
+                ),
+            }
+        )
+        return result
 
     def device_online(self, uid: str) -> bool | None:
         mac = self._device_mac.get(uid)
@@ -272,16 +293,13 @@ class CommunicationTracker:
 
         result: dict[str, Any] = {}
         model = _first_metadata_value(
-            payload,
-            ("model", "device", "device_type", "type", "gw_type"),
+            payload, ("model", "device", "device_type", "type", "gw_type")
         )
         firmware = _first_metadata_value(
-            payload,
-            ("fw", "firmware", "firmware_version", "version"),
+            payload, ("fw", "firmware", "firmware_version", "version")
         )
         cloud = _first_metadata_value(
-            payload,
-            ("cloud", "cloud_status", "cloudstatus"),
+            payload, ("cloud", "cloud_status", "cloudstatus")
         )
         if model:
             result["model"] = model
@@ -291,7 +309,9 @@ class CommunicationTracker:
             result["cloud_status"] = cloud
         return result
 
-    def add_listener(self, key: str, listener: Callable[[], None]) -> Callable[[], None]:
+    def add_listener(
+        self, key: str, listener: Callable[[], None]
+    ) -> Callable[[], None]:
         self._listeners[key].add(listener)
 
         @callback
@@ -313,16 +333,19 @@ class CommunicationTracker:
         self._seed_from_existing_messages()
         self._install_message_hook()
 
-        # These are MQTT broker subscriptions only. They do not send a query to
-        # CU3 or to any BUS device and therefore do not add BUS traffic.
         for mac in self.gateway_macs:
             try:
                 self.mqtt.client.subscribe(f"inels/status/{mac}/gw", qos=0)
                 self.mqtt.client.subscribe(f"inels/connected/{mac}/gw", qos=0)
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("Unable to subscribe gateway diagnostics for %s: %s", mac, exc)
+            except Exception as exc:
+                LOGGER.debug(
+                    "Unable to subscribe gateway diagnostics for %s: %s", mac, exc
+                )
 
         self._last_broker_online = self.broker_online
+        for mac in self.gateway_macs:
+            self._gateway_watchdog_state[mac] = self.gateway_health_state(mac)
+
         self._unsub_interval = async_track_time_interval(
             self.hass,
             self._watchdog_tick,
@@ -349,7 +372,7 @@ class CommunicationTracker:
     def _seed_from_existing_messages(self) -> None:
         try:
             messages = dict(self.mqtt.messages())
-        except Exception:  # noqa: BLE001
+        except Exception:
             return
 
         for topic, payload in messages.items():
@@ -369,14 +392,8 @@ class CommunicationTracker:
             payload = bytes(msg.payload) if isinstance(msg.payload, bytearray) else msg.payload
             retained = bool(getattr(msg, "retain", False))
 
-            # Paho runs callbacks in its own thread. Keep all tracker state on
-            # the Home Assistant event-loop thread.
             self.hass.loop.call_soon_threadsafe(
-                self._process_message,
-                topic,
-                payload,
-                retained,
-                True,
+                self._process_message, topic, payload, retained, True
             )
 
             if self._original_on_message is not None:
@@ -390,17 +407,11 @@ class CommunicationTracker:
         if self._message_wrapper is not None and client.on_message is self._message_wrapper:
             return
 
-        # The pinned legacy library may replace on_message when subscribing.
-        # Re-install the wrapper if that ever happens.
         self._original_on_message = client.on_message
         self._install_message_hook()
 
     def _process_message(
-        self,
-        topic: str,
-        payload: Any,
-        retained: bool,
-        fresh: bool,
+        self, topic: str, payload: Any, retained: bool, fresh: bool
     ) -> None:
         parts = topic.split("/")
         if len(parts) < 4 or parts[0] != "inels":
@@ -417,8 +428,6 @@ class CommunicationTracker:
         if mac not in self._gateway_macs:
             self._gateway_macs.add(mac)
 
-        # Any non-retained live status/connected packet from this MAC proves
-        # current MQTT traffic through that installation.
         if fresh and not retained:
             self._gateway_last_seen[mac] = now
             self._maybe_report_gateway_seen(mac, now)
@@ -426,9 +435,17 @@ class CommunicationTracker:
         if element_type == "gw":
             if message_type == "connected":
                 new_state = _parse_connected(payload)
+
+                if fresh and not retained and new_state is not False:
+                    self._gateway_heartbeat_seen[mac] = now
+
                 if self._gateway_connected.get(mac) != new_state:
                     self._gateway_connected[mac] = new_state
                     self._mark_gateway_dirty(mac, include_devices=True)
+
+                if fresh and not retained:
+                    self._dirty.add(f"gateway:{mac}")
+
             elif message_type == "status":
                 parsed, buses = _parse_gateway_payload(payload)
                 if parsed and parsed != self._gateway_status.get(mac):
@@ -506,17 +523,45 @@ class CommunicationTracker:
             if device_mac == mac:
                 self._dirty.add(f"device:{uid}")
 
+    def _check_gateway_watchdogs(self, now: datetime) -> None:
+        for mac in self.gateway_macs:
+            new_state = self.gateway_health_state(mac, now)
+            old_state = self._gateway_watchdog_state.get(mac)
+
+            if old_state == new_state:
+                continue
+
+            self._gateway_watchdog_state[mac] = new_state
+            self._mark_gateway_dirty(mac, include_devices=True)
+
+            age = self.gateway_heartbeat_age_seconds(mac, now)
+            if new_state == "warning":
+                LOGGER.warning(
+                    "iNELS CU %s MQTT heartbeat delayed (%s s)", mac, age
+                )
+            elif new_state == "offline" and old_state not in {None, "offline"}:
+                LOGGER.warning(
+                    "iNELS CU %s MQTT communication unavailable "
+                    "(last heartbeat %s s ago)",
+                    mac,
+                    age,
+                )
+            elif new_state == "ok" and old_state in {"warning", "offline"}:
+                LOGGER.info("iNELS CU %s MQTT communication restored", mac)
+
     @callback
     def _watchdog_tick(self, now: datetime) -> None:
         self._ensure_message_hook()
 
+        current = _utcnow()
         broker_online = self.broker_online
         if broker_online != self._last_broker_online:
             self._last_broker_online = broker_online
             for mac in self.gateway_macs:
                 self._mark_gateway_dirty(mac, include_devices=True)
 
-        self._flush_pending_last_seen(_utcnow())
+        self._check_gateway_watchdogs(current)
+        self._flush_pending_last_seen(current)
         self._notify_dirty()
 
     def _notify_dirty(self) -> None:
@@ -529,5 +574,7 @@ class CommunicationTracker:
             for listener in tuple(self._listeners.get(key, ())):
                 try:
                     listener()
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.debug("Communication diagnostic listener failed: %s", exc)
+                except Exception as exc:
+                    LOGGER.debug(
+                        "Communication diagnostic listener failed: %s", exc
+                    )

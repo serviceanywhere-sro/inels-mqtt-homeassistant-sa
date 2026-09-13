@@ -113,7 +113,9 @@ async def async_setup_entry(
     """Load iNELS binary sensors and communication diagnostics."""
     device_list: list[Device] = hass.data[DOMAIN][config_entry.entry_id][DEVICES]
     old_entities: list[str] = (
-        hass.data[DOMAIN][config_entry.entry_id][OLD_ENTITIES].get(Platform.BINARY_SENSOR)
+        hass.data[DOMAIN][config_entry.entry_id][OLD_ENTITIES].get(
+            Platform.BINARY_SENSOR
+        )
         or []
     )
 
@@ -199,7 +201,9 @@ class InelsBinarySensor(InelsBaseEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(device=device, key=key, index=index)
         self.entity_description = description
-        self._attr_unique_id = slugify(f"{self._attr_unique_id}_{description.key}")
+        self._attr_unique_id = slugify(
+            f"{self._attr_unique_id}_{description.key}"
+        )
         self.entity_id = f"{Platform.BINARY_SENSOR}.{self._attr_unique_id}"
         self._attr_name = f"{self._attr_name} {description.name}"
 
@@ -224,7 +228,9 @@ class InelsBinaryInputSensor(InelsBaseEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(device=device, key=key, index=index)
         self.entity_description = description
-        self._attr_unique_id = slugify(f"{self._attr_unique_id}_{description.key}")
+        self._attr_unique_id = slugify(
+            f"{self._attr_unique_id}_{description.key}"
+        )
         self.entity_id = f"{Platform.BINARY_SENSOR}.{self._attr_unique_id}"
         self._attr_name = f"{self._attr_name} {description.name}"
 
@@ -346,10 +352,10 @@ class InelsGatewayMqttBinarySensor(_GatewayBinarySensor):
 
 
 class InelsGatewayOnlineBinarySensor(_GatewayBinarySensor):
-    """Whether the iNELS gateway reports itself online."""
+    """Watchdog for MQTT communication between one CU and Home Assistant."""
 
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_name = "iNELS gateway"
+    _attr_name = "CU MQTT communication"
 
     def __init__(self, mac: str, tracker: Any) -> None:
         super().__init__(mac, tracker, "online")
@@ -360,7 +366,7 @@ class InelsGatewayOnlineBinarySensor(_GatewayBinarySensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return self._tracker.gateway_metadata(self._mac)
+        return self._tracker.gateway_diagnostic_attributes(self._mac)
 
 
 class InelsGatewayBusBinarySensor(_GatewayBinarySensor):
