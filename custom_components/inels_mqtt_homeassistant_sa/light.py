@@ -7,10 +7,13 @@ RGB/RGBW handling notes:
 - The Y value is kept at 100 while ON and 0 while OFF.
 - OFF explicitly clears R/G/B/W and Y.
 - A plain ON after OFF starts as pure white instead of restoring an old color.
+- An external/wall-switch OFF->ON is detected from STATUS and corrected to
+  pure white at the physical intensity reported by the DA3-03M/RGBW.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -218,6 +221,14 @@ class InelsLight(InelsBaseEntity, LightEntity):
         # RGB/RGBW controls in HA can issue a dense stream of service calls.
         self._rgb_command_revision = 0
 
+        # Type 153 can internally restore its previous colour when it is turned
+        # on by a wall controller. Track OFF->ON STATUS transitions so an
+        # external ON can be corrected to pure white. HA-originated ON commands
+        # are marked for a short time and must not be mistaken for wall control.
+        self._rgbw_last_seen_level = 0
+        self._rgbw_local_on_until = 0.0
+        self._rgbw_external_white_task: asyncio.Task[Any] | None = None
+
         # All RGB/RGBW channels of one physical actuator share one MQTT SET.
         self._rgb_command_lock: asyncio.Lock | None = None
         if key in {"rgb", "rgbw"}:
@@ -246,6 +257,11 @@ class InelsLight(InelsBaseEntity, LightEntity):
             self._last_nonzero_percent = current
 
         self._remember_color_from_item(self._state_item())
+
+        if self.key == "rgbw":
+            item = self._state_item()
+            if item is not None:
+                self._rgbw_last_seen_level = self._rgbw_level(item)
 
     def _state_item(self) -> Any | None:
         """Return this channel's parsed state object."""
@@ -482,6 +498,102 @@ class InelsLight(InelsBaseEntity, LightEntity):
         item.r, item.g, item.b, item.w = scaled
         item.brightness = 100
 
+    def _callback(self) -> None:
+        """Handle MQTT state updates and detect an external RGBW ON."""
+
+        # Device callbacks arrive from Paho's network thread. The device state
+        # has already been parsed by Device.callback() before this entity
+        # callback is invoked, so it is safe to inspect the freshly parsed item.
+        if self.key == "rgbw":
+            item = self._state_item()
+            new_level = self._rgbw_level(item) if item is not None else 0
+            old_level = self._rgbw_last_seen_level
+            self._rgbw_last_seen_level = new_level
+
+            if old_level <= 0 < new_level:
+                # HA ON commands are tagged before SET is published. The next
+                # OFF->ON status transition is therefore expected and must keep
+                # the colour explicitly selected in HA.
+                if time.monotonic() <= self._rgbw_local_on_until:
+                    self._rgbw_local_on_until = 0.0
+                else:
+                    hass = getattr(self, "hass", None)
+                    if hass is not None:
+                        try:
+                            hass.loop.call_soon_threadsafe(
+                                self._schedule_external_rgbw_white
+                            )
+                        except RuntimeError:
+                            pass
+
+        # Preserve the normal thread-safe Home Assistant state refresh.
+        super()._callback()
+
+    def _schedule_external_rgbw_white(self) -> None:
+        """Schedule one debounced correction for a wall-switch RGBW ON."""
+
+        task = self._rgbw_external_white_task
+        if task is not None and not task.done():
+            task.cancel()
+
+        self._rgbw_external_white_task = self.hass.async_create_task(
+            self._async_force_external_rgbw_white(),
+            f"iNELS RGBW wall ON -> white {self.entity_id}",
+        )
+
+    def _cancel_external_rgbw_white(self) -> None:
+        """Cancel a pending wall-ON correction when HA issues its own command."""
+
+        task = self._rgbw_external_white_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._rgbw_external_white_task = None
+
+    async def _async_force_external_rgbw_white(self) -> None:
+        """Force an externally switched-on RGBW channel to pure white."""
+
+        try:
+            # Let the wall controller/CU finish the physical ON transition and
+            # report its resulting intensity before we preserve that intensity.
+            await asyncio.sleep(0.15)
+
+            lock = self._rgb_command_lock
+            if lock is None:
+                return
+
+            async with lock:
+                ha_val = self._device.get_value().ha_value
+                if ha_val is None or not hasattr(ha_val, self.key):
+                    return
+
+                item = ha_val.__dict__[self.key][self.index]
+                level = self._rgbw_level(item)
+                if level <= 0:
+                    return
+
+                r, g, b, w = self._rgbw_channels(item)
+                if r == 0 and g == 0 and b == 0 and w > 0:
+                    return
+
+                # Preserve only the actual physical intensity, not the stale
+                # colour internally restored by DA3-03M/RGBW.
+                self._set_rgbw_scaled(item, (0, 0, 0, 100), level)
+                self._last_nonzero_percent = level
+
+                LOGGER.info(
+                    "RGBW external ON detected for %s channel %s; forcing white at %s%%",
+                    self._device.unique_id,
+                    self.index + 1,
+                    level,
+                )
+
+                await self._async_publish_value(ha_val)
+
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._rgbw_external_white_task = None
+
     @property
     def available(self) -> bool:
         """Return availability."""
@@ -624,6 +736,8 @@ class InelsLight(InelsBaseEntity, LightEntity):
     async def _async_rgbw_turn_off(self) -> None:
         """Turn DA3-03M/RGBW fully off."""
 
+        self._cancel_external_rgbw_white()
+        self._rgbw_local_on_until = 0.0
         revision = self._next_rgb_revision()
 
         lock = self._rgb_command_lock
@@ -645,10 +759,12 @@ class InelsLight(InelsBaseEntity, LightEntity):
 
             self._set_rgbw_scaled(item, (0, 0, 0, 0), 0)
             await self._async_publish_value(ha_val)
+            self._rgbw_last_seen_level = 0
 
     async def _async_rgbw_turn_on(self, kwargs: dict[str, Any]) -> None:
         """Handle DA3-03M/RGBW colour and brightness independently."""
 
+        self._cancel_external_rgbw_white()
         revision = self._next_rgb_revision()
 
         if any(
@@ -686,8 +802,10 @@ class InelsLight(InelsBaseEntity, LightEntity):
                 target_level = current_level if current_level > 0 else 100
 
             if target_level <= 0:
+                self._rgbw_local_on_until = 0.0
                 self._set_rgbw_scaled(item, (0, 0, 0, 0), 0)
                 await self._async_publish_value(ha_val)
+                self._rgbw_last_seen_level = 0
                 return
 
             if ATTR_RGBW_COLOR in kwargs:
@@ -717,8 +835,13 @@ class InelsLight(InelsBaseEntity, LightEntity):
             if not kwargs and current_level > 0:
                 return
 
+            was_off = current_level <= 0
             self._set_rgbw_scaled(item, base_color, target_level)
             self._last_nonzero_percent = target_level
+
+            if was_off and target_level > 0:
+                self._rgbw_local_on_until = time.monotonic() + 2.0
+
             await self._async_publish_value(ha_val)
 
     async def _async_rgb_turn_off(self) -> None:

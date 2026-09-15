@@ -1,16 +1,19 @@
-iNELS MQTT Home Assistant SA 0.2.18 - DA3-03M/RGBW jas + bile ON
+iNELS MQTT Home Assistant SA 0.2.19 - RGBW wall switch white fix
 
-Nahraj do:
-custom_components/inels_mqtt_homeassistant_sa/light.py
-custom_components/inels_mqtt_homeassistant_sa/manifest.json
+Nahraj pouze:
+- custom_components/inels_mqtt_homeassistant_sa/light.py
+- custom_components/inels_mqtt_homeassistant_sa/manifest.json
 
-Zmeny pouze pro RGBW:
-- HA jas uz nereguluje pouze Y, ale skaluje skutecne R/G/B/W kanaly.
-- Y je pri ON drzen na 100 %, pri OFF na 0 %.
-- OFF posila R=G=B=W=Y=0.
-- Proste ON z vypnuteho stavu nastavi cistou bilou.
-- Pokud je svetlo zapnute barevne a meni se jen jas, odstin se zachova.
-- Pri prime volbe barvy se pouzije vybrana barva.
-- Ostatni typy svetel zustavaji beze zmeny.
+Změna proti 0.2.18:
+- zachovává správnou regulaci jasu RGBW podle fyzických R/G/B/W kanálů,
+- HA ON po OFF zůstává čistá bílá,
+- nově detekuje externí/nástěnné OFF->ON u RGBW typu 153,
+- pokud DA3-03M interně obnoví starou barvu, po 150 ms odešle jeden opravný SET na čistou bílou,
+- zachová přitom skutečnou intenzitu z fyzických RGBW kanálů,
+- HA-originované zapnutí/změna barvy se od externího ON rozlišuje a neopravuje se omylem.
 
-Po nahrani proved plny restart Home Assistantu.
+Poznámka:
+Při zapnutí RGBW typu 153 nástěnným ovladačem se nyní záměrně objeví jeden inels/set/... retain=false.
+Je to nutné, protože jinak DA3-03M fyzicky obnoví svou interně uloženou předchozí barvu.
+
+Po nahrání proveď plný restart Home Assistantu.
