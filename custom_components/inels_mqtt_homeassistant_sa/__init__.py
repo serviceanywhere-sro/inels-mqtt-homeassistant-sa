@@ -6,11 +6,11 @@ from typing import Any
 import inelsmqtt
 import paho.mqtt.client as paho_mqtt
 from inelsmqtt import InelsMqtt
-from inelsmqtt.const import INELS_COMM_TEST_DICT, LIGHT, MQTT_TIMEOUT
+from inelsmqtt.const import LIGHT, MQTT_TIMEOUT
 from inelsmqtt.devices import Device
-from inelsmqtt.discovery import InelsDiscovery
 from inelsmqtt.protocols.cu3 import DT_114, DT_153
 from inelsmqtt.utils.common import Formatter
+from inelsmqtt.utils.core import INELS_ASSUMED_STATE_DEVICES, ProtocolHandlerMapper
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, Platform
@@ -33,61 +33,99 @@ COMM_TRACKER = "communication_tracker"
 
 
 # ---------------------------------------------------------------------------
-# SAFETY: NO ACTIVE PER-DEVICE COMMUNICATION TESTS
+# SAFE MQTT PUBLISH + PASSIVE DISCOVERY
 #
-# The upstream elkoep-mqtt discovery code can actively publish a "communication
-# test" to inels/set/... for devices that were seen only on a connected topic.
-# For this integration we intentionally do NOT probe individual iNELS devices.
-# Communication health is evaluated passively at CU/gateway level only.
-# ---------------------------------------------------------------------------
-
-INELS_COMM_TEST_DICT.clear()
-
-
-# ---------------------------------------------------------------------------
-# DIAGNOSTICS: LOG EVERY OUTGOING inels/set COMMAND
+# elkoep-mqtt 0.2.33b3 actively sends COMM_TEST commands from its discovery
+# routine for devices seen only on inels/connected/....  We intentionally do
+# not use that discovery routine.  The integration discovers devices only from
+# already received MQTT data and never sends a health-check command to a BUS/RF
+# component.
 #
-# All normal Device.set_ha_value() calls eventually use InelsMqtt.publish().
-# Wrapping that method gives us one central place to see every physical command
-# sent by Home Assistant, including the MQTT retain flag.
+# Also, SET commands must never be retained by the broker.  A retained
+# inels/set/... command can be replayed when CU reconnects and can therefore
+# unexpectedly switch relays or lights.  Override publish only on our MQTT
+# instance, not globally on the third-party library.
 # ---------------------------------------------------------------------------
 
-_ORIGINAL_INELS_PUBLISH = InelsMqtt.publish
 
+class SafeInelsMqtt(InelsMqtt):
+    """iNELS MQTT client that never retains hardware SET commands."""
 
-def _publish_with_set_logging(
-    self: InelsMqtt,
-    topic: str,
-    payload: Any,
-    qos: int = 0,
-    retain: bool = True,
-    properties: Any = None,
-) -> bool:
-    """Log every outgoing iNELS SET command and publish it unchanged."""
+    def publish(
+        self,
+        topic: str,
+        payload: Any,
+        qos: int = 0,
+        retain: bool = True,
+        properties: Any = None,
+    ) -> bool:
+        """Publish MQTT while forcing retain=False for inels/set topics."""
 
-    if str(topic).startswith("inels/set/"):
         requested_retain = retain
-        retain = False
-        LOGGER.warning(
-            "iNELS SET TX topic=%s qos=%s retain=%s requested_retain=%s payload=%r",
+        if str(topic).startswith("inels/set/"):
+            retain = False
+            LOGGER.warning(
+                "iNELS SET TX topic=%s qos=%s retain=%s requested_retain=%s payload=%r",
+                topic,
+                qos,
+                retain,
+                requested_retain,
+                payload,
+            )
+
+        return super().publish(
             topic,
-            qos,
-            retain,
-            requested_retain,
             payload,
+            qos=qos,
+            retain=retain,
+            properties=properties,
         )
 
-    return _ORIGINAL_INELS_PUBLISH(
-        self,
-        topic,
-        payload,
-        qos=qos,
-        retain=retain,
-        properties=properties,
-    )
 
+class PassiveInelsDiscovery:
+    """Discover iNELS devices without sending per-device COMM_TEST commands."""
 
-InelsMqtt.publish = _publish_with_set_logging
+    def __init__(self, mqtt: InelsMqtt) -> None:
+        self._mqtt = mqtt
+        self._devices: list[Device] = []
+
+    @property
+    def devices(self) -> list[Device]:
+        """Return discovered devices."""
+
+        return self._devices
+
+    def discovery(self) -> list[Device]:
+        """Discover devices passively from MQTT status/connected messages."""
+
+        discovered = self._mqtt.discovery_all()
+        device_topics: list[str] = []
+
+        for topic_suffix, payload in discovered.items():
+            parts = topic_suffix.split("/")
+            if len(parts) < 3:
+                continue
+
+            device_type = parts[1]
+            handler = ProtocolHandlerMapper.get_handler(device_type)
+            if handler is None:
+                continue
+
+            # A real STATUS packet is enough to create a device.  Keep the two
+            # upstream assumed-state RF controller types compatible as well.
+            if payload is not None or handler in INELS_ASSUMED_STATE_DEVICES:
+                device_topics.append(topic_suffix)
+
+        self._devices = [
+            Device(self._mqtt, "inels/status/" + topic_suffix)
+            for topic_suffix in device_topics
+        ]
+
+        LOGGER.info(
+            "Passive iNELS discovery completed: %d devices found; no COMM_TEST sent",
+            len(self._devices),
+        )
+        return self._devices
 
 
 class _PahoCompat:
@@ -396,7 +434,7 @@ async def async_setup_entry(
     }
 
     mqtt: InelsMqtt = await hass.async_add_executor_job(
-        InelsMqtt,
+        SafeInelsMqtt,
         broker_config,
     )
 
@@ -427,7 +465,7 @@ async def async_setup_entry(
     tracker: CommunicationTracker | None = None
 
     try:
-        discovery = InelsDiscovery(mqtt)
+        discovery = PassiveInelsDiscovery(mqtt)
 
         await hass.async_add_executor_job(
             discovery.discovery
