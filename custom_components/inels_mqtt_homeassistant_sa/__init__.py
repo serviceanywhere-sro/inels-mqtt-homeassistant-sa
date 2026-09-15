@@ -6,7 +6,7 @@ from typing import Any
 import inelsmqtt
 import paho.mqtt.client as paho_mqtt
 from inelsmqtt import InelsMqtt
-from inelsmqtt.const import LIGHT, MQTT_TIMEOUT
+from inelsmqtt.const import INELS_COMM_TEST_DICT, LIGHT, MQTT_TIMEOUT
 from inelsmqtt.devices import Device
 from inelsmqtt.discovery import InelsDiscovery
 from inelsmqtt.protocols.cu3 import DT_114, DT_153
@@ -30,6 +30,61 @@ from .const import (
 )
 
 COMM_TRACKER = "communication_tracker"
+
+
+# ---------------------------------------------------------------------------
+# SAFETY: NO ACTIVE PER-DEVICE COMMUNICATION TESTS
+#
+# The upstream elkoep-mqtt discovery code can actively publish a "communication
+# test" to inels/set/... for devices that were seen only on a connected topic.
+# For this integration we intentionally do NOT probe individual iNELS devices.
+# Communication health is evaluated passively at CU/gateway level only.
+# ---------------------------------------------------------------------------
+
+INELS_COMM_TEST_DICT.clear()
+
+
+# ---------------------------------------------------------------------------
+# DIAGNOSTICS: LOG EVERY OUTGOING inels/set COMMAND
+#
+# All normal Device.set_ha_value() calls eventually use InelsMqtt.publish().
+# Wrapping that method gives us one central place to see every physical command
+# sent by Home Assistant, including the MQTT retain flag.
+# ---------------------------------------------------------------------------
+
+_ORIGINAL_INELS_PUBLISH = InelsMqtt.publish
+
+
+def _publish_with_set_logging(
+    self: InelsMqtt,
+    topic: str,
+    payload: Any,
+    qos: int = 0,
+    retain: bool = True,
+    properties: Any = None,
+) -> bool:
+    """Log every outgoing iNELS SET command and publish it unchanged."""
+
+    if str(topic).startswith("inels/set/"):
+        LOGGER.warning(
+            "iNELS SET TX topic=%s qos=%s retain=%s payload=%r",
+            topic,
+            qos,
+            retain,
+            payload,
+        )
+
+    return _ORIGINAL_INELS_PUBLISH(
+        self,
+        topic,
+        payload,
+        qos=qos,
+        retain=retain,
+        properties=properties,
+    )
+
+
+InelsMqtt.publish = _publish_with_set_logging
 
 
 class _PahoCompat:
@@ -377,8 +432,9 @@ async def async_setup_entry(
 
         inels_data[DEVICES] = discovery.devices
 
-        # Passive communication diagnostics. This only observes MQTT packets
-        # that are already flowing and adds no polling traffic to CU3/BUS.
+        # Passive CU-level communication diagnostics. This only observes MQTT
+        # packets that are already flowing and sends no health-check commands
+        # to individual BUS/RF devices.
         tracker = CommunicationTracker(
             hass,
             mqtt,

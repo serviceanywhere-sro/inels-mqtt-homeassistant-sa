@@ -110,7 +110,7 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Load iNELS binary sensors and communication diagnostics."""
+    """Load iNELS binary sensors and CU-level communication diagnostics."""
     device_list: list[Device] = hass.data[DOMAIN][config_entry.entry_id][DEVICES]
     old_entities: list[str] = (
         hass.data[DOMAIN][config_entry.entry_id][OLD_ENTITIES].get(
@@ -162,12 +162,11 @@ async def async_setup_entry(
                         )
                     )
 
+    # Communication diagnostics exist only on CU/gateway level.
+    # We intentionally do NOT create one "Communication" entity for every
+    # individual BUS/RF component.
     tracker = hass.data[DOMAIN][config_entry.entry_id].get(COMM_TRACKER)
     if tracker is not None:
-        for device in device_list:
-            if tracker.is_physical_device(device):
-                entities.append(InelsCommunicationBinarySensor(device, tracker))
-
         for mac in tracker.gateway_macs:
             entities.extend(
                 [
@@ -259,7 +258,7 @@ class InelsBinaryInputSensor(InelsBaseEntity, BinarySensorEntity):
 
 
 class _TrackerBinarySensor(BinarySensorEntity):
-    """Base class for passive communication diagnostics."""
+    """Base class for passive CU/gateway communication diagnostics."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_should_poll = False
@@ -277,43 +276,6 @@ class _TrackerBinarySensor(BinarySensorEntity):
     @callback
     def _tracker_updated(self) -> None:
         self.async_write_ha_state()
-
-
-class InelsCommunicationBinarySensor(_TrackerBinarySensor):
-    """Communication state of one physical iNELS device."""
-
-    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-    _attr_has_entity_name = True
-    _attr_name = "Communication"
-
-    def __init__(self, device: Device, tracker: Any) -> None:
-        super().__init__(tracker, f"device:{device.unique_id}")
-        self._device = device
-        self._attr_unique_id = slugify(f"{device.unique_id}_communication")
-        self.entity_id = f"{Platform.BINARY_SENSOR}.{self._attr_unique_id}"
-
-    @property
-    def is_on(self) -> bool | None:
-        return self._tracker.device_online(self._device.unique_id)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        mac = self._tracker.device_mac(self._device)
-        return {
-            "gateway_mac": mac,
-            "communication_mode": "passive_mqtt",
-        }
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        info = self._device.info()
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._device.unique_id)},
-            manufacturer=info.manufacturer,
-            model=info.model_number,
-            name=self._device.title,
-            sw_version=info.sw_version,
-        )
 
 
 class _GatewayBinarySensor(_TrackerBinarySensor):
