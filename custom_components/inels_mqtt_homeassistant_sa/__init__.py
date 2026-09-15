@@ -66,11 +66,14 @@ def _publish_with_set_logging(
     """Log every outgoing iNELS SET command and publish it unchanged."""
 
     if str(topic).startswith("inels/set/"):
+        requested_retain = retain
+        retain = False
         LOGGER.warning(
-            "iNELS SET TX topic=%s qos=%s retain=%s payload=%r",
+            "iNELS SET TX topic=%s qos=%s retain=%s requested_retain=%s payload=%r",
             topic,
             qos,
             retain,
+            requested_retain,
             payload,
         )
 
