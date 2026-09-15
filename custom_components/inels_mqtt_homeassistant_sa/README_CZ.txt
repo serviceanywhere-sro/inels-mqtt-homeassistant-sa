@@ -1,15 +1,13 @@
-iNELS MQTT Home Assistant SA – 0.2.15
+iNELS MQTT Home Assistant SA 0.2.17 - RGBW OFF fix
 
-Nahraďte po verzi 0.2.14 pouze:
-custom_components/inels_mqtt_homeassistant_sa/__init__.py
+Nahraj do:
+custom_components/inels_mqtt_homeassistant_sa/light.py
 custom_components/inels_mqtt_homeassistant_sa/manifest.json
 
 Změna:
-- všechny odchozí příkazy inels/set/... jsou natvrdo odesílány s retain=False
-- v logu zůstává záznam každého SET příkazu
-- log obsahuje retain=False a requested_retain=... pro kontrolu, co požadovala knihovna
-- aktivní COMM TEST jednotlivých komponent zůstává vypnutý
+- RGB/RGBW OFF nyní vynuluje R/G/B/W i Y/brightness.
+- Poslední nenulová barva a jas se uloží v entitě a při dalším ON obnoví.
+- brightness=0 poslaný přes light.turn_on se rovněž zpracuje jako skutečný OFF.
+- Ostatní typy světel zůstávají beze změny.
 
-POZOR:
-Staré retained zprávy uložené v MQTT brokeru je nutné jednorázově smazat.
-Tato verze je už znovu nevytvoří.
+Po nahrání proveď plný restart Home Assistantu.
