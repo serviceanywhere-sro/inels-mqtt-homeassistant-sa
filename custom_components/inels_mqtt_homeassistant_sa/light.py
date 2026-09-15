@@ -2,10 +2,11 @@
 
 RGB/RGBW handling notes:
 - iNELS uses native 0-100 values.
-- For DA3-03M/RGBW (type 153), OFF must explicitly clear the physical
-  R/G/B/W channels as well as the Y/brightness value.
-- The last non-zero RGB/RGBW color and brightness are kept locally and are
-  restored on the next ON.
+- For DA3-03M/RGBW (type 153), the physical R/G/B/W channel values themselves
+  determine visible intensity. HA brightness therefore scales R/G/B/W.
+- The Y value is kept at 100 while ON and 0 while OFF.
+- OFF explicitly clears R/G/B/W and Y.
+- A plain ON after OFF starts as pure white instead of restoring an old color.
 """
 from __future__ import annotations
 
@@ -400,6 +401,87 @@ class InelsLight(InelsBaseEntity, LightEntity):
             if hasattr(item, attr):
                 setattr(item, attr, 0)
 
+    @staticmethod
+    def _rgbw_channels(item: Any) -> tuple[int, int, int, int]:
+        """Return physical RGBW channel levels on the native 0-100 scale."""
+
+        def clamp(value: Any) -> int:
+            try:
+                return max(0, min(100, int(value)))
+            except (TypeError, ValueError):
+                return 0
+
+        return (
+            clamp(getattr(item, "r", 0)),
+            clamp(getattr(item, "g", 0)),
+            clamp(getattr(item, "b", 0)),
+            clamp(getattr(item, "w", 0)),
+        )
+
+    @classmethod
+    def _rgbw_level(cls, item: Any) -> int:
+        """Return effective RGBW brightness from the strongest physical channel."""
+
+        return max(cls._rgbw_channels(item))
+
+    @classmethod
+    def _rgbw_normalized_channels(
+        cls,
+        item: Any,
+    ) -> tuple[int, int, int, int]:
+        """Return the current RGBW colour normalized to a 100 % peak."""
+
+        channels = cls._rgbw_channels(item)
+        peak = max(channels)
+        if peak <= 0:
+            return (0, 0, 0, 0)
+
+        return tuple(
+            max(0, min(100, round(channel * 100 / peak)))
+            for channel in channels
+        )
+
+    @staticmethod
+    def _normalize_rgbw_values(
+        values: tuple[int, int, int, int] | list[int],
+    ) -> tuple[int, int, int, int]:
+        """Normalize arbitrary RGBW values to a 100 % peak."""
+
+        native = tuple(max(0, min(100, int(v))) for v in values)
+        peak = max(native)
+        if peak <= 0:
+            return (0, 0, 0, 100)
+
+        return tuple(round(v * 100 / peak) for v in native)
+
+    @classmethod
+    def _set_rgbw_scaled(
+        cls,
+        item: Any,
+        base_color: tuple[int, int, int, int] | list[int],
+        brightness_percent: int,
+    ) -> None:
+        """Apply colour and HA brightness directly to physical RGBW channels."""
+
+        brightness_percent = max(0, min(100, int(brightness_percent)))
+
+        if brightness_percent <= 0:
+            item.r = 0
+            item.g = 0
+            item.b = 0
+            item.w = 0
+            item.brightness = 0
+            return
+
+        normalized = cls._normalize_rgbw_values(base_color)
+        scaled = tuple(
+            max(0, min(100, round(v * brightness_percent / 100)))
+            for v in normalized
+        )
+
+        item.r, item.g, item.b, item.w = scaled
+        item.brightness = 100
+
     @property
     def available(self) -> bool:
         """Return availability."""
@@ -408,27 +490,27 @@ class InelsLight(InelsBaseEntity, LightEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True when brightness/Y and visible channels are active."""
+        """Return whether this light is physically producing output."""
+
+        item = self._state_item()
+        if item is None:
+            return None
+
+        if self.key == "rgbw":
+            level = self._rgbw_level(item)
+            if level > 0:
+                self._last_nonzero_percent = level
+            return level > 0
 
         percent = self._read_percent()
-
         if percent is None:
             return None
 
-        item = self._state_item()
-
-        if item is not None and self.key in {"rgb", "rgbw"}:
+        if self.key == "rgb":
             self._remember_color_from_item(item)
-
-            visible = (
-                not self._rgbw_is_black(item)
-                if hasattr(item, "w")
-                else not self._rgb_is_black(item)
-            )
-
+            visible = not self._rgb_is_black(item)
             if percent > 0 and visible:
                 self._last_nonzero_percent = percent
-
             return percent > 0 and visible
 
         if percent > 0:
@@ -446,13 +528,21 @@ class InelsLight(InelsBaseEntity, LightEntity):
     def brightness(self) -> int | None:
         """Return Home Assistant brightness 0-255."""
 
-        percent = self._read_percent()
+        item = self._state_item()
+        if item is None:
+            return None
 
+        if self.key == "rgbw":
+            percent = self._rgbw_level(item)
+            if percent > 0:
+                self._last_nonzero_percent = percent
+            return round(percent * 255 / 100)
+
+        percent = self._read_percent()
         if percent is None:
             return None
 
-        item = self._state_item()
-        if item is not None and self.key in {"rgb", "rgbw"}:
+        if self.key == "rgb":
             self._remember_color_from_item(item)
 
         if percent > 0:
@@ -477,16 +567,13 @@ class InelsLight(InelsBaseEntity, LightEntity):
 
     @property
     def rgbw_color(self) -> tuple[int, int, int, int] | None:
-        """Return RGBW color."""
+        """Return RGBW colour independently of the HA brightness level."""
 
         state = self._state_item()
 
         if state is not None and hasattr(state, "w"):
-            self._remember_color_from_item(state)
-            return tuple(
-                int(self._clamp_percent(i) * 255 / 100)
-                for i in (state.r, state.g, state.b, state.w)
-            )
+            normalized = self._rgbw_normalized_channels(state)
+            return tuple(round(v * 255 / 100) for v in normalized)
 
         return None
 
@@ -533,6 +620,106 @@ class InelsLight(InelsBaseEntity, LightEntity):
             ha_val,
         )
         self.async_write_ha_state()
+
+    async def _async_rgbw_turn_off(self) -> None:
+        """Turn DA3-03M/RGBW fully off."""
+
+        revision = self._next_rgb_revision()
+
+        lock = self._rgb_command_lock
+        if lock is None:
+            return
+
+        async with lock:
+            if not self._rgb_revision_is_current(revision):
+                return
+
+            ha_val = self._device.get_value().ha_value
+            if ha_val is None or not hasattr(ha_val, self.key):
+                return
+
+            item = ha_val.__dict__[self.key][self.index]
+            current_level = self._rgbw_level(item)
+            if current_level > 0:
+                self._last_nonzero_percent = current_level
+
+            self._set_rgbw_scaled(item, (0, 0, 0, 0), 0)
+            await self._async_publish_value(ha_val)
+
+    async def _async_rgbw_turn_on(self, kwargs: dict[str, Any]) -> None:
+        """Handle DA3-03M/RGBW colour and brightness independently."""
+
+        revision = self._next_rgb_revision()
+
+        if any(
+            key in kwargs
+            for key in (
+                ATTR_BRIGHTNESS,
+                ATTR_RGB_COLOR,
+                ATTR_RGBW_COLOR,
+            )
+        ):
+            await asyncio.sleep(RGB_UI_DEBOUNCE_SECONDS)
+            if not self._rgb_revision_is_current(revision):
+                return
+
+        lock = self._rgb_command_lock
+        if lock is None:
+            return
+
+        async with lock:
+            if not self._rgb_revision_is_current(revision):
+                return
+
+            ha_val = self._device.get_value().ha_value
+            if ha_val is None or not hasattr(ha_val, self.key):
+                return
+
+            item = ha_val.__dict__[self.key][self.index]
+            current_level = self._rgbw_level(item)
+            explicit_brightness = ATTR_BRIGHTNESS in kwargs
+
+            if explicit_brightness:
+                ha_brightness = max(0, min(255, int(kwargs[ATTR_BRIGHTNESS])))
+                target_level = round(ha_brightness * 100 / 255)
+            else:
+                target_level = current_level if current_level > 0 else 100
+
+            if target_level <= 0:
+                self._set_rgbw_scaled(item, (0, 0, 0, 0), 0)
+                await self._async_publish_value(ha_val)
+                return
+
+            if ATTR_RGBW_COLOR in kwargs:
+                rgbw = kwargs[ATTR_RGBW_COLOR]
+                requested = tuple(
+                    round(max(0, min(255, int(v))) * 100 / 255)
+                    for v in rgbw
+                )
+                base_color = self._normalize_rgbw_values(requested)
+
+            elif ATTR_RGB_COLOR in kwargs:
+                rgb = kwargs[ATTR_RGB_COLOR]
+                requested = (
+                    round(max(0, min(255, int(rgb[0]))) * 100 / 255),
+                    round(max(0, min(255, int(rgb[1]))) * 100 / 255),
+                    round(max(0, min(255, int(rgb[2]))) * 100 / 255),
+                    0,
+                )
+                base_color = self._normalize_rgbw_values(requested)
+
+            elif current_level > 0:
+                base_color = self._rgbw_normalized_channels(item)
+
+            else:
+                base_color = (0, 0, 0, 100)
+
+            if not kwargs and current_level > 0:
+                return
+
+            self._set_rgbw_scaled(item, base_color, target_level)
+            self._last_nonzero_percent = target_level
+            await self._async_publish_value(ha_val)
 
     async def _async_rgb_turn_off(self) -> None:
         """Turn RGB/RGBW fully off and remember its previous state."""
@@ -689,7 +876,11 @@ class InelsLight(InelsBaseEntity, LightEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn light off."""
 
-        if self.key in {"rgb", "rgbw"}:
+        if self.key == "rgbw":
+            await self._async_rgbw_turn_off()
+            return
+
+        if self.key == "rgb":
             await self._async_rgb_turn_off()
             return
 
@@ -708,7 +899,11 @@ class InelsLight(InelsBaseEntity, LightEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn light on or change brightness/color."""
 
-        if self.key in {"rgb", "rgbw"}:
+        if self.key == "rgbw":
+            await self._async_rgbw_turn_on(dict(kwargs))
+            return
+
+        if self.key == "rgb":
             await self._async_rgb_turn_on(dict(kwargs))
             return
 
